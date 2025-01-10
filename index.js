@@ -34,6 +34,7 @@ const verifyToken = async (req, res, next) => {
     next();
   });
 };
+
 // MongoDB URI
 const uri = `mongodb://${process.env.NAME_USER}:${process.env.USER_PASS}@cluster0-shard-00-00.whh17.mongodb.net:27017,cluster0-shard-00-01.whh17.mongodb.net:27017,cluster0-shard-00-02.whh17.mongodb.net:27017/?ssl=true&replicaSet=atlas-7nculf-shard-0&authSource=admin&retryWrites=true&w=majority&appName=Cluster0`;
 MongoClient.connect(uri, { useUnifiedTopology: true }).then(client => {
@@ -41,6 +42,7 @@ MongoClient.connect(uri, { useUnifiedTopology: true }).then(client => {
   let userCollection = db.collection('users');
 
   let plantsCollection = db.collection('plants');
+  let ordersCollection = db.collection('orders');
 
   // Generate jwt token
   app.post('/jwt', async (req, res) => {
@@ -71,6 +73,80 @@ MongoClient.connect(uri, { useUnifiedTopology: true }).then(client => {
     }
   });
 
+  const verifyAdmin = async (req, res, next) => {
+    console.log('data from verifyToken middleware', req.user);
+    const email = req.user?.email;
+    const query = { email };
+    const result = await userCollection.findOne(query);
+    if (!result || result?.role !== 'admin') {
+      return res
+        .status(403)
+        .send({ message: 'Forvidden access! Admins only.' });
+    }
+    next();
+  };
+  const verifySeller = async (req, res, next) => {
+    console.log('data from verifyToken middleware', req.user);
+    const email = req.user?.email;
+    const query = { email };
+    const result = await userCollection.findOne(query);
+    if (!result || result?.role !== 'seller') {
+      return res
+        .status(403)
+        .send({ message: 'Forvidden access! Admins only.' });
+    }
+    next();
+  };
+
+  //manage user  status and role
+  app.patch('/users/:email', async (req, res) => {
+    const email = req.params.email;
+    const query = { email };
+    const user = await userCollection.findOne(query);
+    if (!user || user.status === 'Requested') {
+      return res
+        .status?.(400)
+        .send('you have a already requested, wait for some time!');
+    }
+    const updateDoc = {
+      $set: {
+        status: 'Requested',
+      },
+    };
+    const result = await userCollection.updateOne(query, updateDoc);
+    res.send(result);
+  });
+
+  //get user role
+  app.get('/users/role/:email', async (req, res) => {
+    const email = req.params.email;
+    const result = await userCollection.findOne({ email: email });
+    // res.send({ role: result?.role });
+
+    if (result) {
+      res.send({ role: result.role });
+    } else {
+      res.status(404).send({ message: 'User not found' });
+    }
+  });
+  // get all user data
+  app.get('/all-user/:email', verifyToken, verifyAdmin, async (req, res) => {
+    const email = req.params.email;
+    const query = { email: { $ne: email } };
+    const result = await userCollection.find(query).toArray();
+    res.send(result);
+  });
+  //user update role
+  app.patch('/user/role/:email', verifyToken, async (req, res) => {
+    const email = req.params.email;
+    const { role } = req.body;
+    const filter = { email };
+    const updateDoc = {
+      $set: { role, status: 'Verified' },
+    };
+    const result = await userCollection.updateOne(filter, updateDoc);
+    res.send(result);
+  });
   // POST: Add a new item to the collection
   app.post('/users/:email', async (req, res) => {
     const email = req.params.email;
@@ -92,8 +168,15 @@ MongoClient.connect(uri, { useUnifiedTopology: true }).then(client => {
     const result = await plantsCollection.find().toArray();
     res.send(result);
   });
-
-  app.post('/plants', verifyToken, async (req, res) => {
+  //all seller plants
+  app.get('/plants/seller', verifyToken, verifySeller, async (req, res) => {
+    const email = req.user.email;
+    const result = await plantsCollection
+      .find({ 'seller.email': email })
+      .toArray();
+    res.send(result);
+  });
+  app.post('/plants', verifyToken, verifySeller, async (req, res) => {
     const plants = req.body;
     const result = await plantsCollection.insertOne(plants);
     res.send(result);
@@ -104,6 +187,96 @@ MongoClient.connect(uri, { useUnifiedTopology: true }).then(client => {
     const id = req.params.id;
     const query = { _id: new ObjectId(id) };
     const result = await plantsCollection.findOne(query);
+    res.send(result);
+  });
+  //save the order data
+  app.post('/order', verifyToken, async (req, res) => {
+    const orderInfo = req.body;
+    const result = await ordersCollection.insertOne(orderInfo);
+    res.send(result);
+  });
+  //manage the quantity of the plants
+  app.patch('/plants/quantity/:id', verifyToken, async (req, res) => {
+    const id = req.params.id;
+    const { quantityToUpdate, status } = req.body;
+    const filter = { _id: new ObjectId(id) };
+    let updateDoc = {
+      $inc: {
+        quantity: -quantityToUpdate,
+      },
+    };
+    if (status === 'increase') {
+      updateDoc = {
+        $inc: {
+          quantity: quantityToUpdate,
+        },
+      };
+    }
+    const result = await plantsCollection.updateOne(filter, updateDoc);
+    res.send(result);
+  });
+  //get all orders for a specific customer
+  app.get('/orders/customers/:email', verifyToken, async (req, res) => {
+    const email = req.params.email;
+    const query = { 'customer.email': email };
+
+    try {
+      const result = await ordersCollection
+        .aggregate([
+          {
+            $match: query,
+          },
+          {
+            $addFields: {
+              plantId: { $toObjectId: '$plantId' },
+            },
+          },
+          {
+            $lookup: {
+              from: 'plants',
+              localField: 'plantId',
+              foreignField: '_id',
+              as: 'plants',
+            },
+          },
+          {
+            $unwind: '$plants',
+          },
+          {
+            $addFields: {
+              name: '$plants.name',
+              image: '$plants.image',
+              category: '$plants.category',
+            },
+          },
+          {
+            $project: {
+              // price: 1,
+              // name: 1,
+              plants: 0,
+            },
+          },
+        ])
+        .toArray();
+
+      res.send(result);
+    } catch (error) {
+      res.status(500).send({
+        error: 'Failed to fetch customer orders',
+        message: error.message,
+      });
+    }
+  });
+  //cancel delete an order
+  app.delete('/orders/:id', verifyToken, async (req, res) => {
+    const id = req.params.id;
+    const query = { _id: new ObjectId(id) };
+    const order = await ordersCollection.findOne(query);
+    if (order.status === 'Delivered') {
+      return res.status(409).send({ message: 'Order already delivetred' });
+    }
+
+    const result = await ordersCollection.deleteOne(query);
     res.send(result);
   });
   // Default route
