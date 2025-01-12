@@ -7,6 +7,7 @@ const { MongoClient, timestamp, ObjectId } = require('mongodb');
 const morgan = require('morgan');
 const port = process.env.PORT || 5000;
 const jwt = require('jsonwebtoken');
+const nodemailer = require('nodemailer');
 // Middleware
 const corsOptions = {
   origin: ['http://localhost:5173', 'http://localhost:5174'],
@@ -35,6 +36,43 @@ const verifyToken = async (req, res, next) => {
   });
 };
 
+//nodemiler
+const sendEmail = (emailAddress, emailData) => {
+  // const emailData = {
+  //   subject: 'This is a very important subject',
+  //   message: 'Nice Message',
+  // };
+  const transporter = nodemailer.createTransport({
+    host: 'smtp.gmail.com',
+    port: 587,
+    secure: false, // true for port 465, false for other ports
+    auth: {
+      user: process.env.NODEMILER_USER,
+      pass: process.env.NODEMILAR_PASS,
+    },
+  });
+  transporter.verify((error, success) => {
+    if (error) {
+      console.log(error);
+    } else {
+      console.log('Transporter is ready to email', success);
+    }
+  });
+  const mailBody = {
+    from: '"Maddison Foo Koch 👻" <maddison53@ethereal.email>',
+    to: emailAddress,
+    subject: emailData?.subject, // Subject line
+    text: emailData?.message, // plain text body
+    html: `<p>${emailData?.message}</p>`, // html body
+  };
+  transporter.sendMail(mailBody, (error, info) => {
+    if (error) {
+      console.log(error);
+    } else {
+      console.log('Email send:', info?.response);
+    }
+  });
+};
 // MongoDB URI
 const uri = `mongodb://${process.env.NAME_USER}:${process.env.USER_PASS}@cluster0-shard-00-00.whh17.mongodb.net:27017,cluster0-shard-00-01.whh17.mongodb.net:27017,cluster0-shard-00-02.whh17.mongodb.net:27017/?ssl=true&replicaSet=atlas-7nculf-shard-0&authSource=admin&retryWrites=true&w=majority&appName=Cluster0`;
 MongoClient.connect(uri, { useUnifiedTopology: true }).then(client => {
@@ -136,6 +174,7 @@ MongoClient.connect(uri, { useUnifiedTopology: true }).then(client => {
     const result = await userCollection.find(query).toArray();
     res.send(result);
   });
+
   //user update role
   app.patch('/user/role/:email', verifyToken, async (req, res) => {
     const email = req.params.email;
@@ -149,6 +188,7 @@ MongoClient.connect(uri, { useUnifiedTopology: true }).then(client => {
   });
   // POST: Add a new item to the collection
   app.post('/users/:email', async (req, res) => {
+    // sendEmail();
     const email = req.params.email;
     const query = { email };
     const user = req.body;
@@ -176,6 +216,13 @@ MongoClient.connect(uri, { useUnifiedTopology: true }).then(client => {
       .toArray();
     res.send(result);
   });
+  //plent delete
+  app.delete('/plants/:id', verifyToken, verifySeller, async (req, res) => {
+    const id = req.params.id;
+    const query = { _id: new ObjectId(id) };
+    const result = await plantsCollection.deleteOne(query);
+    res.send(result);
+  });
   app.post('/plants', verifyToken, verifySeller, async (req, res) => {
     const plants = req.body;
     const result = await plantsCollection.insertOne(plants);
@@ -193,8 +240,42 @@ MongoClient.connect(uri, { useUnifiedTopology: true }).then(client => {
   app.post('/order', verifyToken, async (req, res) => {
     const orderInfo = req.body;
     const result = await ordersCollection.insertOne(orderInfo);
+    //send email
+    // if (result?.insertedId) {
+    //   // Sending email to customer after successful order
+    //   sendEmail(orderInfo?.customer?.email, {
+    //     subject: 'Order Successfully Placed',
+    //     text: `You've placed an order successfully. Transaction ID: ${result?.insertedId}`,
+    //     html: `<p>You've placed an order successfully. <strong>Transaction ID:</strong> ${result?.insertedId}</p>`,
+    //   });
+
+    //   // Sending email to seller after successful order
+    //   sendEmail(orderInfo?.seller?.email, {
+    //     subject: 'New Order Received',
+    //     text: `A new order has been placed successfully. Transaction ID: ${result?.insertedId}`,
+    //     html: `<p>A new order has been placed successfully. <strong>Transaction ID:</strong> ${result?.insertedId}</p>`,
+    //   });
+    // }
+
     res.send(result);
   });
+  //order statuse update
+  app.patch(
+    '/orders-status/:id',
+    verifyToken,
+
+    async (req, res) => {
+      const id = req.params.id;
+      const { status } = req.body;
+      console.log('order changes', status);
+      const filter = { id: new ObjectId(id) };
+      const updateDoc = {
+        $set: { status },
+      };
+      const result = await ordersCollection.updateOne(filter, updateDoc);
+      res.send(result);
+    }
+  );
   //manage the quantity of the plants
   app.patch('/plants/quantity/:id', verifyToken, async (req, res) => {
     const id = req.params.id;
@@ -267,6 +348,59 @@ MongoClient.connect(uri, { useUnifiedTopology: true }).then(client => {
       });
     }
   });
+
+  //get all orders for a specific seller
+  app.get('/orders/seller/:email', verifyToken, async (req, res) => {
+    const email = req.params.email;
+    const query = { 'customer.email': email };
+
+    try {
+      const result = await ordersCollection
+        .aggregate([
+          {
+            $match: query,
+          },
+          {
+            $addFields: {
+              plantId: { $toObjectId: '$plantId' },
+            },
+          },
+          {
+            $lookup: {
+              from: 'plants',
+              localField: 'plantId',
+              foreignField: '_id',
+              as: 'plants',
+            },
+          },
+          {
+            $unwind: '$plants',
+          },
+          {
+            $addFields: {
+              name: '$plants.name',
+              image: '$plants.image',
+              category: '$plants.category',
+            },
+          },
+          {
+            $project: {
+              // price: 1,
+              // name: 1,
+              plants: 0,
+            },
+          },
+        ])
+        .toArray();
+
+      res.send(result);
+    } catch (error) {
+      res.status(500).send({
+        error: 'Failed to fetch customer orders',
+        message: error.message,
+      });
+    }
+  });
   //cancel delete an order
   app.delete('/orders/:id', verifyToken, async (req, res) => {
     const id = req.params.id;
@@ -278,6 +412,110 @@ MongoClient.connect(uri, { useUnifiedTopology: true }).then(client => {
 
     const result = await ordersCollection.deleteOne(query);
     res.send(result);
+  });
+  // app.get('/admin-start', async (req, res) => {
+
+  //   try {
+  //     const totalUser = await userCollection.countDocuments();
+  //     const totalPlants = await plantsCollection.estimatedDocumentCount();
+  //     const totalOrder = await ordersCollection.estimatedDocumentCount();
+
+  //     const orders = await ordersCollection.find().toArray();
+  //     const totalPrice = orders.reduce(
+  //       (sum, order) => sum + (order.price || 0),
+  //       0
+  //     );
+
+  //     res.send({ totalUser, totalPlants, totalOrder, totalPrice });
+  //   } catch (error) {
+  //     console.error('Error fetching admin statistics:', error);
+  //     res.status(500).send({ error: 'Internal Server Error' });
+  //   }
+  // });
+
+  app.get('/admin-stat', verifyToken, verifyAdmin, async (req, res) => {
+    // get total user, total plants
+    const totalUser = await userCollection.estimatedDocumentCount();
+    const totalPlants = await plantsCollection.estimatedDocumentCount();
+
+    const allOrder = await ordersCollection.find().toArray();
+    // const totalOrders = allOrder.length
+    // const totalPrice = allOrder.reduce((sum, order) => sum + order.price, 0)
+
+    // const myData = {
+    //   date: '11/01/2025',
+    //   quantity: 12,
+    //   price: 1500,
+    //   order: 3,
+    // }
+    // generate chart data
+    const chartData = await ordersCollection
+      .aggregate([
+        { $sort: { _id: -1 } },
+        {
+          $addFields: {
+            _id: {
+              $dateToString: {
+                format: '%Y-%m-%d',
+                date: { $toDate: '$_id' },
+              },
+            },
+            quantity: {
+              $sum: '$quantity',
+            },
+            price: { $sum: '$price' },
+            order: { $sum: 1 },
+          },
+        },
+
+        {
+          $project: {
+            _id: 0,
+            date: '$_id',
+            quantity: 1,
+            order: 1,
+            price: 1,
+          },
+        },
+      ])
+      .toArray();
+
+    // get total revenue, total order
+    const ordersDetails = await ordersCollection
+      .aggregate([
+        {
+          $group: {
+            _id: null,
+            totalRevenue: { $sum: '$price' },
+            totalOrder: { $sum: 1 },
+          },
+        },
+        {
+          $project: {
+            _id: 0,
+          },
+        },
+      ])
+      .next();
+
+    res.send({
+      totalPlants,
+      totalUser,
+      ...ordersDetails,
+      chartData,
+    });
+  });
+
+  app.post('/creact-payment-intent', verifyToken, async (req, res) => {
+    const { quantity, plantId } = req.body;
+    const plant = await plantsCollection.findOne({
+      _id: new ObjectId(plantId),
+    });
+    if (!plant) {
+      return res.status(400).send({ message: 'Plant not Found' });
+    }
+    const totalPrice = quantity * plant.price * 100;
+    console.log(totalPrice);
   });
   // Default route
   app.get('/', (req, res) => {
